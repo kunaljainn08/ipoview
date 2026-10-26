@@ -800,24 +800,19 @@ const HEADS={
 };
 const ORDER=Object.keys(HEADS);
 
-function pageLines(tc){
-  const items=tc.items.filter(it=>it.str&&it.str.trim()!=="");const rows=[];
-  items.forEach(it=>{const fs=Math.hypot(it.transform[0],it.transform[1])||10;const y=it.transform[5],x=it.transform[4];let r=rows.find(r=>Math.abs(r.y-y)<=Math.max(2,fs*0.35));if(!r){r={y,fs,parts:[]};rows.push(r)}r.parts.push({x,w:it.width||0,s:it.str,fs})});
-  rows.sort((a,b)=>b.y-a.y);
-  return rows.map(r=>{r.parts.sort((a,b)=>a.x-b.x);let out="",prev=null;r.parts.forEach(p=>{if(prev){const gap=p.x-(prev.x+prev.w);out+=gap>p.fs*1.2?"   ":gap>p.fs*0.12?" ":""}out+=p.s;prev=p});return out.replace(/[ \t]+/g," ").trim()}).filter(Boolean).join("\n");
-}
+function pageLines(tc,rows){rows=rows||buildRows(tc);return rows.map(r=>r.cells.map(c=>c.s).join("   ")).join("\n")}
 async function readPdf(file){
   if(!window.pdfjsLib)throw new Error("The PDF reader could not load. Check your internet connection and reload the page.");
   pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
-  const pages=[];
+  const pages=[],grid=[];
   for(let i=1;i<=pdf.numPages;i++){
     const p=await pdf.getPage(i);const tc=await p.getTextContent();
-    let txt="";try{txt=pageLines(tc)}catch(e){txt=tc.items.map(it=>it.str+(it.hasEOL?"\n":" ")).join("")}
-    pages.push(txt);p.cleanup();
+    let txt="",rows=null;try{rows=buildRows(tc);txt=pageLines(tc,rows)}catch(e){txt=tc.items.map(it=>it.str+(it.hasEOL?"\n":" ")).join("")}
+    pages.push(txt);grid.push(rows||[]);p.cleanup();
     if(i%4===0||i===pdf.numPages){$("readText").textContent=`Reading page ${i} of ${pdf.numPages}`;$("readBar").style.width=(i/pdf.numPages*100)+"%";await new Promise(r=>setTimeout(r,0))}
   }
-  return {pdf,pages};
+  return {pdf,pages,grid};
 }
 
 function locate(pages){
@@ -862,13 +857,15 @@ function extractFacts(pages,sec){
   let r=findIn(pages,1,coverTo,new RegExp("FRESH ISSUE OF[^]{0,260}?AGGREGATING UP TO\\s*"+CUR+AMT,"i"));
   F.fresh={v:r?toCr(r.m[1],r.m[2]):null,page:r&&r.page};
   if(!r){r=findIn(pages,sumFrom,sumTo,new RegExp("Fresh Issue[^]{0,200}?aggregating up to\\s*"+CUR+AMT,"i"));if(r)F.fresh={v:toCr(r.m[1],r.m[2]),page:r.page}}
-  r=findIn(pages,1,coverTo,/FRESH ISSUE OF UP TO\s*([\d,]+)\s*EQUITY SHARES/i);F.freshShares={v:r?num(r.m[1]):null,page:r&&r.page};
+  r=findIn(pages,1,coverTo,/FRESH ISSUE(?:\s+OF)?[^0-9]{0,30}?([\d,]{7,})(?=\s*(?:EQUITY|\s|$))/i);F.freshShares={v:r?num(r.m[1]):null,page:r&&r.page};
   r=findIn(pages,1,coverTo,/OFFER FOR SALE OF UP TO\s*([\d,]+)\s*EQUITY SHARES/i);
   F.ofsShares={v:r?num(r.m[1]):null,page:r&&r.page};
   r=findIn(pages,1,coverTo,new RegExp("OFFER FOR SALE[^]{0,300}?AGGREGATING UP TO\\s*"+CUR+AMT,"i"));
   F.ofs={v:r?toCr(r.m[1],r.m[2]):null,page:r&&r.page};
   r=findIn(pages,1,Math.min(N,12),new RegExp("PRICE BAND[^]{0,120}?"+CUR+"([\\d,]+(?:\\.\\d+)?)\\s*(?:TO|-|–)\\s*(?:"+CUR+")?([\\d,]+(?:\\.\\d+)?)","i"));
   F.band={v:r?`₹${r.m[1]} – ₹${r.m[2]}`:null,lo:r?num(r.m[1]):null,hi:r?num(r.m[2]):null,page:r&&r.page};
+  if(!F.band.hi){const r2=findIn(pages,1,Math.min(N,60),new RegExp("Price Band of\\s*"+CUR+"([\\d,]+(?:\\.\\d+)?)\\s*(?:to|-|–)\\s*(?:"+CUR+")?([\\d,]+(?:\\.\\d+)?)","i"));if(r2)F.band={v:`₹${r2.m[1]} – ₹${r2.m[2]}`,lo:num(r2.m[1]),hi:num(r2.m[2]),page:r2.page}}
+  if(!F.band.hi){const r3=findIn(pages,1,Math.min(N,12),new RegExp("(?:ISSUE|OFFER) PRICE[^0-9₹]{0,40}?"+CUR+"([\\d,]+(?:\\.\\d+)?)\\s*PER EQUITY SHARE","i"));if(r3)F.band={v:`₹${r3.m[1]} (final issue price)`,lo:num(r3.m[1]),hi:num(r3.m[1]),page:r3.page,final:true}}
   r=findIn(pages,1,coverTo,new RegExp("FACE VALUE OF\\s*"+CUR+"(\\d+(?:\\.\\d+)?)\\s*EACH","i"));
   F.fv={v:r?num(r.m[1]):null,page:r&&r.page};
   r=findIn(pages,1,coverTo,/(?:EMPLOYEE RESERVATION|QIB|QUALIFIED INSTITUTIONAL BUYERS)[^]{0,40}?(NOT MORE THAN|NOT LESS THAN)\s*(\d+)%/i);
@@ -891,7 +888,7 @@ function extractFacts(pages,sec){
   F.anchor=dt("ANCHOR INVESTOR BIDDING DATE");
   r=findIn(pages,1,Math.min(N,12),/(?:minimum (?:Bid )?(?:lot )?of|Bids can be made for a minimum of|Minimum Bid Lot(?: is)?)\s*([\d,]+)\s*Equity Shares/i);
   F.lot={v:r?num(r.m[1]):null,page:r&&r.page};
-  if(!F.lot.v){r=findIn(pages,1,Math.min(N,30),/(?:Bid Lot|Minimum Bid|Market Lot)[^0-9\[]{0,40}([\d,]{1,6})\s*Equity Shares/i);if(r)F.lot={v:num(r.m[1]),page:r.page}}
+  if(!F.lot.v){r=findIn(pages,1,Math.min(N,120),/(?:Bid Lot|Minimum Bid|Market Lot)[^0-9\[]{0,40}([\d,]{1,6})\s*Equity Shares/i);if(r)F.lot={v:num(r.m[1]),page:r.page}}
   F.hasOFS=/OFFER FOR SALE OF UP TO|OFFER FOR SALE OF\s*[\d,]+/i.test(pages.slice(0,6).join(" "));
   F.ofsOnly=!F.fresh.v&&(F.ofsShares.v||/OFFER FOR SALE/i.test(cover))&&!/FRESH ISSUE/i.test(cover);
   return F;
@@ -1017,8 +1014,8 @@ async function loadFile(file){
   if(!/\.pdf$/i.test(file.name)&&file.type!=="application/pdf"){alert("Please choose the RHP or DRHP as a PDF file.");return}
   const st=t=>{$("readText").textContent=t};
   $("readStatus").hidden=false;st("Opening…");$("readBar").style.width="2%";
-  let pdf,pages;
-  try{({pdf,pages}=await readPdf(file))}catch(e){console.error(e);st(e.message||"This PDF could not be opened. Make sure it isn’t password-protected.");return}
+  let pdf,pages,grid;
+  try{({pdf,pages,grid}=await readPdf(file))}catch(e){console.error(e);st(e.message||"This PDF could not be opened. Make sure it isn’t password-protected.");return}
   const chars=pages.reduce((s,t)=>s+t.length,0);
   if(chars<pages.length*80){st("This PDF has almost no selectable text (it may be a scan). Download the text version from SEBI or the exchange website.");return}
   st("Finding sections, risk factors and financials…");await new Promise(r=>setTimeout(r,0));
@@ -1027,7 +1024,7 @@ async function loadFile(file){
   const F=safe(()=>extractFacts(pages,sec),null);
   if(!F){st("Couldn’t read this document’s structure. Is it an Indian RHP or DRHP?");return}
   const keepAnchor=(!D&&W.anchor&&W.anchor.rows.length)?W.anchor:null;
-  D={pdf,pages,file:file.name,sec,F,risks:safe(()=>extractRisks(pages,sec),[]),flags:safe(()=>scanFlags(pages,Math.min(...[sec.summary,sec.risk].filter(Boolean).map(x=>x.start),pages.length)),[])};
+  D={pdf,pages,grid,file:file.name,sec,F,risks:safe(()=>extractRisks(pages,sec),[]),flags:safe(()=>scanFlags(pages,Math.min(...[sec.summary,sec.risk].filter(Boolean).map(x=>x.start),pages.length)),[])};
   W=blankW();if(keepAnchor)W.anchor=keepAnchor;
   W.company=F.name.v||file.name.replace(/\.pdf$/i,"");
   if(fin(F.fresh.v))W.offer.fresh=+F.fresh.v.toFixed(2);
@@ -1035,13 +1032,13 @@ async function loadFile(file){
   if(fin(F.band.hi))W.offer.price=F.band.hi;
   if(fin(F.lot.v))W.pulse.lot=F.lot.v;
   W.about=safe(()=>aboutFromDoc(pages,sec),"");if(fin(F.band.lo))W.priceLow=F.band.lo;W.dates={open:F.open.v,close:F.close.v};
-  const FIN=safe(()=>extractFinancials(pages,sec),null);D.fin=FIN;
+  const FIN=mergeFin(safe(()=>extractFinancials(pages,sec),null),safe(()=>extractFinancialsGrid(grid,pages,sec),null));D.fin=FIN;
   if(FIN&&FIN.rows.length){W.years=FIN.rows;W.unit="cr"}
   const SH=safe(()=>extractShares(pages,sec,F,FIN),null);D.shares=SH;if(SH)W.offer.shares=+SH.post.toFixed(4);
   D.biz=safe(()=>extractBusiness(pages,sec),{strengths:[],strategies:[],objects:[]});
   deriveOffer();
   const PM=safe(()=>extractPromoter(pages,sec),null);D.prom=PM;if(PM){W.offer.promPre=PM.pre;if(fin(PM.post))W.offer.promPost=PM.post}
-  const PR=safe(()=>extractPeers(pages,sec,F),{rows:[],page:null});D.peerImport=PR;if(PR.rows.length)W.peers=PR.rows;
+  const PR=safe(()=>extractPeersGrid(grid,pages,sec,F),null)||safe(()=>extractPeers(pages,sec,F),{rows:[],page:null});D.peerImport=PR;if(PR.rows.length)W.peers=PR.rows;
   if(W.anchor.rows.length&&fin(W.offer.price))W.anchor.rows.forEach(r=>{if(!fin(num(r.amt))&&fin(num(r.shares)))r.amt=+(num(r.shares)*W.offer.price/1e7).toFixed(3)});
   W.sample=false;
   detectFromPdf(pdf).then(b=>{if(b){W.brand={c1:b.c1,c2:b.c2||W.brand.c2||"#E0A030",logo:b.logo,src:"Picked up from the logo on the RHP cover (page 1). Adjust if needed."};renderStudio();renderReportTab()}else{W.brand.src="No coloured logo found on the cover. Upload the logo or pick colours."}}).catch(()=>{});
@@ -1567,16 +1564,43 @@ async function readAnchorFile(file){
   if(/\.pdf$/i.test(file.name)||file.type==="application/pdf"){
     if(!window.pdfjsLib)throw new Error("The PDF reader could not load. Check your connection.");
     pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-    const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let out="";
-    for(let i=1;i<=Math.min(pdf.numPages,40);i++){const p=await pdf.getPage(i);const tc=await p.getTextContent();
-      const items=tc.items.filter(it=>it.str.trim());const lines=[];items.forEach(it=>{const y=Math.round(it.transform[5]);let L=lines.find(l=>Math.abs(l.y-y)<=2);if(!L){L={y,parts:[]};lines.push(L)}L.parts.push({x:it.transform[4],s:it.str})});
-      lines.sort((a,b)=>b.y-a.y).forEach(l=>{out+=l.parts.sort((a,b)=>a.x-b.x).map(p=>p.s).join(" ")+"\n"})}
-    return out;
+    const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let out="";const grid=[];
+    for(let i=1;i<=Math.min(pdf.numPages,60);i++){const p=await pdf.getPage(i);const tc=await p.getTextContent();const rows=buildRows(tc);grid.push(rows);out+=rows.map(r=>r.cells.map(c=>c.s).join("   ")).join("\n")+"\n"}
+    return {text:out,grid,scanned:out.replace(/\s/g,"").length<pdf.numPages*40};
   }
-  if(/\.xlsx?$/i.test(file.name)&&window.XLSX){const wb=XLSX.read(await file.arrayBuffer());return wb.SheetNames.map(n=>XLSX.utils.sheet_to_csv(wb.Sheets[n],{FS:" "})).join("\n")}
-  return await file.text();
+  if(/\.xlsx?$/i.test(file.name)&&window.XLSX){const wb=XLSX.read(await file.arrayBuffer());return {text:wb.SheetNames.map(n=>XLSX.utils.sheet_to_csv(wb.Sheets[n],{FS:"   "})).join("\n")}}
+  return {text:await file.text()};
+}
+function parseAnchorGrid(grid){
+  if(!grid)return [];const out=[];
+  const HK=[["pct",/%|percent|portion/i],["price",/price/i],["amt",/amount|total|value/i],["shares",/no\.?\s*of\s*(?:equity\s*)?shares|shares\s*allo|equity\s*shares|number|shares/i],["name",/name|investor|anchor/i]];
+  grid.forEach(rows=>{
+    let hdrIdx=-1,cols=null;
+    for(let i=0;i<rows.length;i++){const t=rows[i].cells.map(c=>c.s).join(" ");if(/name/i.test(t)&&/(share|amount|allocat)/i.test(t)){hdrIdx=i;break}}
+    if(hdrIdx<0)return;
+    // merge header rows (this + up to 3 below that have no numbers)
+    const hrows=[rows[hdrIdx]];for(let k=hdrIdx+1;k<Math.min(rows.length,hdrIdx+4);k++){const t=rows[k].cells.map(c=>c.s).join(" ");if(numCells(rows[k]).length||!/(no\.|shares|allot|allocat|portion|price|amount|investor|\(|₹|rs\.)/i.test(t)||/a\/c|fund|limited|ltd|trust|insurance/i.test(t))break;hrows.push(rows[k])}
+    const hcells=[];hrows.forEach(r=>r.cells.forEach(c=>{const cx=(c.x0+c.x1)/2;const h=hcells.find(h=>Math.abs(h.cx-cx)<45);if(h){h.s+=" "+c.s;h.x0=Math.min(h.x0,c.x0);h.x1=Math.max(h.x1,c.x1)}else hcells.push({cx,x0:c.x0,x1:c.x1,s:c.s})}));
+    cols=hcells.map(h=>{let k=null;for(const [ck,re] of HK){if(re.test(h.s)){k=ck;break}}if(/s\.?\s*no|sr\.?|sl\.?/i.test(h.s)&&h.s.length<10)k="sr";return {...h,k}});
+    const nameCol=cols.find(c=>c.k==="name");if(!nameCol)return;
+    const numCols=cols.filter(c=>["shares","pct","price","amt"].includes(c.k));
+    const amtUnit=(()=>{const a=cols.find(c=>c.k==="amt");if(!a)return null;return /crore|cr\b/i.test(a.s)?1:/million|mn\b/i.test(a.s)?10:/lakh/i.test(a.s)?100:null})();
+    const body=rows.slice(hdrIdx+hrows.length);const recs=[];const frags=[];
+    body.forEach(r=>{const nc=numCells(r);const txt=r.cells.filter(c=>c.x0<(numCols.length?Math.min(...numCols.map(n=>n.x0))-5:9999)&&!(/^\d{1,3}\.?$/.test(c.s))).map(c=>c.s).join(" ").trim();
+      if(/^(total|grand total|sub-?total)/i.test(txt))return;
+      if(nc.length>=1){const rec={y:r.y,name:txt,vals:{}};nc.forEach(c=>{const cx=(c.x0+c.x1)/2;let best=null,bd=1e9;numCols.forEach(n=>{const d2=Math.abs(n.cx-cx);if(d2<bd){bd=d2;best=n}});if(best&&bd<120&&rec.vals[best.k]==null)rec.vals[best.k]=cval(c.s)});if(Object.keys(rec.vals).length)recs.push(rec)}
+      else if(txt&&/[A-Za-z]{2}/.test(txt))frags.push({y:r.y,s:txt})});
+    frags.forEach(f=>{let best=null,bd=1e9;recs.forEach(r=>{const d2=Math.abs(r.y-f.y);if(d2<bd){bd=d2;best=r}});if(best&&bd<40){best.name=best.y<f.y?(f.s+" "+best.name):(best.name+" "+f.s)}});
+    recs.forEach(r=>{const name=r.name.replace(/\s+/g," ").trim();if(!/[A-Za-z]{3}/.test(name))return;const v=r.vals;
+      let amt=null;if(fin(v.amt)){amt=amtUnit?v.amt/amtUnit:(v.amt>1e5?v.amt/1e7:v.amt)}
+      const price=fin(v.price)&&v.price>0?v.price:num(W.offer.price);
+      if(!fin(amt)&&fin(v.shares)&&fin(price))amt=v.shares*price/1e7;
+      out.push({name:name.slice(0,120),shares:fin(v.shares)?v.shares:"",price:fin(v.price)?v.price:"",amt:fin(amt)?+amt.toFixed(3):"",cat:classifyAnchor(name)})});
+  });
+  return out;
 }
 function anchorStats(){
+  const P=num(W.offer.price);(W.anchor&&W.anchor.rows||[]).forEach(r=>{if(!(fin(num(r.amt))&&num(r.amt)>0)&&fin(num(r.shares))){const pr=num(r.price)||P;if(fin(pr))r.amt=+(num(r.shares)*pr/1e7).toFixed(3)}});
   const AR=(W.anchor&&W.anchor.rows||[]).filter(r=>fin(num(r.amt))&&num(r.amt)>0);if(!AR.length)return null;
   const total=AR.reduce((s,r)=>s+num(r.amt),0);const by={};ACATS.forEach(([k])=>by[k]=0);AR.forEach(r=>by[r.cat||"oth"]+=num(r.amt));
   const sorted=[...AR].sort((a,b)=>num(b.amt)-num(a.amt));const top5=sorted.slice(0,5).reduce((s,r)=>s+num(r.amt),0)/total;
@@ -1658,6 +1682,7 @@ function headerTokens(text){
     else if(kind==="stub2")add(m.index,"stub",+m[2]);
     else if(kind==="months")add(m.index,"months",0);
   }}
+  {const spans=T.map(t=>[t.i,t.i+12]);const re=/\b(20\d{2})\b/g;let mm;const bare=[];while((mm=re.exec(text))){const i=mm.index;if(!spans.some(([a,b])=>i>=a&&i<b+8))bare.push({i,kind:"fy",y:+mm[1]})}if(bare.length>=2)T.push(...bare)}
   T.sort((a,b)=>a.i-b.i);
   const firstFy=T.find(t=>t.kind==="fy");
   const mo=T.find(t=>t.kind==="months"&&(!firstFy||t.i<firstFy.i)&&!/^12/.test(text.slice(t.i,t.i+2)));
@@ -1736,7 +1761,8 @@ function extractShares(pages,sec,F,fin){
 function extractPromoter(pages,sec){
   const pats=[/aggregate\s+(?:pre-?\s*(?:Offer|Issue)\s+)?shareholding of (?:our\s+)?Promoters?(?:,?\s*(?:and|the)?\s*(?:members of (?:the\s+)?)?Promoter Group)?[^%]{0,260}?(\d{1,2}(?:\.\d{1,2})?)\s*%/i,
     /Promoters?(?:\s+and\s+(?:the\s+)?(?:members of the\s+)?Promoter Group)?[^.%]{0,200}?(\d{1,2}(?:\.\d{1,2})?)\s*%\s*of the (?:pre-?\s*Offer|pre-?\s*Issue)/i,
-    /Promoters?\s*(?:and|&)\s*Promoter Group\s+[\d,]{6,}\s+(\d{1,2}\.\d{1,2})\b/i];
+    /Promoters?\s*(?:and|&)\s*Promoter Group\s+[\d,]{6,}\s+(\d{1,2}\.\d{1,2})\b/i,
+    /Promoter\b[^%\n]{0,90}?(?:Limited|Ltd\.?|[A-Z][a-z]+)\s+[\d,]{7,}\s+(\d{1,2}\.\d{1,2})\b/];
   for(const k of ["summary","capital"]){const s=sec[k];if(!s)continue;for(let p=s.start;p<=Math.min(s.end,s.start+30);p++){const t=pages[p-1].replace(/\s+/g," ");
     for(const re of pats){const m=t.match(re);if(m&&+m[1]>0&&+m[1]<=100){const post=t.match(/(\d{1,2}(?:\.\d{1,2})?)\s*%\s*of the (?:post-?\s*Offer|post-?\s*Issue)/i);return {pre:+m[1],post:post?+post[1]:null,page:p}}}}}
   return null;
@@ -1745,7 +1771,102 @@ function deriveOffer(){
   if(!D)return;const F=D.F;const P=num(W.offer.price);
   if(fin(P)&&F.freshShares&&F.freshShares.v&&(!fin(num(W.offer.fresh))||W.offer.freshDerived)){W.offer.fresh=+(F.freshShares.v*P/1e7).toFixed(2);W.offer.freshDerived=true}
   if(fin(P)&&F.ofsShares&&F.ofsShares.v&&(!fin(num(W.offer.ofs))||W.offer.ofsDerived)){W.offer.ofs=+(F.ofsShares.v*P/1e7).toFixed(2);W.offer.ofsDerived=true}
+  if(fin(P)&&D.shares&&!D.shares.freshSh&&fin(num(W.offer.fresh))){W.offer.shares=+(D.shares.pre+num(W.offer.fresh)/P).toFixed(4)}
   if(fin(P)&&!fin(num(W.offer.shares))&&D.shares==null&&D.fin){const SH=extractShares(D.pages,D.sec,F,D.fin);if(SH){D.shares=SH;W.offer.shares=+SH.post.toFixed(4)}}
+}
+
+/* ================= position-aware table reading ================= */
+function buildRows(tc){
+  const items=tc.items.filter(it=>it.str&&it.str.trim()!=="");const rows=[];
+  items.forEach(it=>{const fs=Math.hypot(it.transform[0],it.transform[1])||10;const y=it.transform[5],x=it.transform[4];let r=rows.find(r=>Math.abs(r.y-y)<=Math.max(2,fs*0.35));if(!r){r={y,fs,parts:[]};rows.push(r)}r.parts.push({x,w:it.width||it.str.length*fs*0.5,s:it.str,fs})});
+  rows.sort((a,b)=>b.y-a.y);
+  return rows.map(r=>{r.parts.sort((a,b)=>a.x-b.x);const cells=[];let cur=null;
+    r.parts.forEach(p=>{if(cur){const gap=p.x-cur.x1;if(gap>p.fs*1.0){cells.push(cur);cur=null}else{cur.s+=(gap>p.fs*0.12?" ":"")+p.s;cur.x1=Math.max(cur.x1,p.x+p.w);return}}cur={x0:p.x,x1:p.x+p.w,s:p.s}});
+    if(cur)cells.push(cur);cells.forEach(c=>c.s=c.s.replace(/\s+/g," ").trim());return {y:r.y,fs:r.fs,cells:cells.filter(c=>c.s)}});
+}
+const NUMRE=/^\(?-?[\d,]+(?:\.\d+)?\)?%?$/;const NILRE=/^(?:-|–|—|Nil|NIL|N\.?A\.?|NA|\[●\]|\[•\])$/;
+function numCells(row){
+  const out=[];row.cells.forEach(c=>{const toks=c.s.split(" ");
+    if(toks.length>1&&toks.every(t=>NUMRE.test(t)||NILRE.test(t))){const w=(c.x1-c.x0)/toks.length;toks.forEach((t,i)=>out.push({x0:c.x0+i*w,x1:c.x0+(i+1)*w,s:t}))}
+    else if(NUMRE.test(c.s)||NILRE.test(c.s))out.push(c)});
+  return out.filter(c=>!/^\(\d{1,2}\)$/.test(c.s));
+}
+const cval=s=>NILRE.test(s)?null:(s.startsWith("(")||/^-\d/.test(s)?-1:1)*parseFloat(s.replace(/[(),%\-]/g,""));
+function rowLabel(row,nc){const firstX=nc.length?nc[0].x0:Infinity;return row.cells.filter(c=>c.x1<=firstX+2&&!nc.includes(c)).map(c=>c.s).join(" ").replace(/\s+/g," ").trim()}
+function isDataRow(row){const nc=numCells(row);return nc.length>=2&&rowLabel(row,nc).length>=2}
+function headerLabels(rows,ri,nc){
+  // walk up past body rows, then collect up to 6 header rows
+  const lim=nc[0].x0-15;const labelOnly=r=>numCells(r).length===0&&r.cells.length>0&&r.cells.every(c=>c.x1<=lim)&&r.cells.map(c=>c.s).join(" ").length<90;
+  let k=ri-1;while(k>=0&&(isDataRow(rows[k])||labelOnly(rows[k]))&&ri-k<80)k--;
+  const hdr=[];while(k>=0&&hdr.length<6){const r=rows[k];const txt=r.cells.map(c=>c.s).join(" ");if(txt.length>170||isDataRow(r))break;hdr.unshift(r);k--}
+  const centers=nc.map(c=>(c.x0+c.x1)/2);const labels=nc.map(()=>"");
+  hdr.forEach(r=>r.cells.forEach(c=>{const cx=(c.x0+c.x1)/2;if(c.x1<nc[0].x0-30)return;let best=-1,bd=1e9;centers.forEach((x,i)=>{const d=Math.abs(cx-x);if(d<bd){bd=d;best=i}});
+    const span=c.x1-c.x0;if(best>=0&&(bd<90||span>120)){if(span>120&&bd>=90){centers.forEach((x,i)=>{if(x>=c.x0-20&&x<=c.x1+20)labels[i]+=" "+c.s})}else labels[best]+=" "+c.s}}));
+  return labels.map(l=>l.trim());
+}
+function colKind(label){
+  const L=label||"";
+  if(/months|period ended|quarter|\bH[12]\b|\bQ[1-4]\b|[369]M\b|June|September|Sept|December|\bDec\b|\bJun\b|\bSep\b/i.test(L)&&!/March\s+31,?\s*20\d{2}\s*$/i.test(L.trim()))return {kind:"stub"};
+  let m=L.match(/(20\d{2})\s*[-–]\s*(\d{2})\b(?!\d)/);if(m)return {kind:"fy",y:2000+ +m[2]};
+  m=L.match(/(?:FY|Fiscal)\s*'?(\d{2})\b(?!\d)/i);if(m&&!/20\d{2}/.test(L))return {kind:"fy",y:2000+ +m[1]};
+  const ys=L.match(/20\d{2}/g);if(ys)return {kind:"fy",y:+ys[ys.length-1]};
+  return null;
+}
+function unitNear(rows,ri){for(let k=ri;k>=Math.max(0,ri-40);k--){const u=unitOf(rows[k].cells.map(c=>c.s).join(" "));if(u)return u}return null}
+function extractFinancialsGrid(grid,pages,sec){
+  if(!grid)return null;const N=grid.length;const ranges=[];
+  const addR=(k,max)=>{const s=sec[k];if(s)ranges.push([s.start,Math.min(s.end,s.start+max)])};
+  addR("summary",40);addR("sfi",25);addR("restated",80);addR("basis",20);addR("mda",50);addR("otherfin",15);ranges.push([1,Math.min(N,Math.max(100,Math.round(N*0.7)))]);
+  const docUnit=(()=>{const c={};ranges.forEach(([a,b])=>{for(let p=a;p<=b;p++){const u=unitOf(pages[p-1]||"");if(u)c[u]=(c[u]||0)+1}});const best=Object.entries(c).sort((x,y)=>y[1]-x[1])[0];return best?+best[0]:10})();
+  const cand={};const seen=new Set();
+  ranges.forEach(([a,b],ri)=>{for(let p=a;p<=b;p++){if(seen.has(p))continue;seen.add(p);const rows=grid[p-1]||[];
+    rows.forEach((row,i)=>{
+      const nc=numCells(row);if(nc.length<2)return;if(nc.some(c=>/%$/.test(c.s)))return;
+      let label=rowLabel(row,nc);
+      let key=(FROWS.find(([,re])=>re.test(label))||[])[0];
+      if(!key&&i>0&&numCells(rows[i-1]).length===0){const prev=rows[i-1].cells.map(c=>c.s).join(" ");if(prev.length<80){const j=prev+" "+label;const k2=(FROWS.find(([,re])=>re.test(j))||[])[0];if(k2){key=k2;label=j}}}
+      if(!key)return;
+      const labs=headerLabels(rows,i,nc);const kinds=labs.map(colKind);
+      const vals={};nc.forEach((c,j)=>{const kd=kinds[j];if(kd&&kd.kind==="fy"&&vals[kd.y]==null){const v2=cval(c.s);if(v2!=null&&isFinite(v2))vals[kd.y]=v2}});
+      const ys=Object.keys(vals);if(ys.length<(key==="rev"?2:1))return;
+      const unit=key==="epsd"?1:(unitNear(rows,i)||unitOf(pages[p-1]||"")||docUnit);
+      (cand[key]=cand[key]||[]).push({vals,page:p,unit,pri:ri,n:ys.length});
+    });
+  }});
+  return finalizeFin(cand);
+}
+function finalizeFin(cand){
+  const pick={};Object.entries(cand).forEach(([k,arr])=>{arr.sort((a,b)=>b.n-a.n||a.pri-b.pri||a.page-b.page);pick[k]=arr[0]});
+  if(!pick.rev)return null;
+  const years=Object.keys(pick.rev.vals).map(Number).sort((a,b)=>a-b).slice(-3);
+  const get=(k,y)=>{const c=pick[k];if(!c||c.vals[y]==null)return null;return k==="epsd"?c.vals[y]:+(c.vals[y]/c.unit).toFixed(2)};
+  const rows=years.map(y=>{const r={label:"FY"+String(y).slice(2)};["rev","ebitda","dep","fin","pat","nw","debt","cash","cfo","rec"].forEach(k=>r[k]=get(k,y));
+    if(r.nw==null&&get("eq",y)!=null&&get("oe",y)!=null)r.nw=+(get("eq",y)+get("oe",y)).toFixed(2);
+    if(r.debt==null&&(get("ltb",y)!=null||get("stb",y)!=null))r.debt=+((get("ltb",y)||0)+(get("stb",y)||0)).toFixed(2);
+    if(r.ebitda==null&&get("pbt",y)!=null&&r.dep!=null&&r.fin!=null)r.ebitda=+(get("pbt",y)+r.dep+r.fin).toFixed(2);
+    return r});
+  const src={};Object.entries(pick).forEach(([k,c])=>src[k]=c.page);
+  const unitName={10:"₹ million",100:"₹ lakh",1:"₹ crore"}[pick.rev.unit]||"₹ million";
+  const ly=years[years.length-1];
+  return {rows,src,unitName,eq:get("eq",ly),epsd:get("epsd",ly),found:Object.keys(pick)};
+}
+function mergeFin(a,b){if(!a)return b;if(!b)return a;const score=f=>f.rows.reduce((s,r)=>s+Object.values(r).filter(x=>typeof x==="number").length,0);return score(b)>score(a)?b:a}
+function extractPeersGrid(grid,pages,sec,F){
+  const s=sec.basis;if(!s||!grid)return null;const own=(F.name.v||"").split(/\s+/)[0].toLowerCase();const rows=[];let page=null;
+  const COLS=[["fv",/face\s*value/i],["rev",/revenue|total\s*income|total\s*sales|turnover/i],["epsb",/basic/i],["epsd",/diluted/i],["eps",/\bEPS\b|earnings\s*per\s*share/i],["pe",/P\s*\/\s*E|price\s*(?:to|\/)\s*earnings/i],["ronw",/RoNW|Return\s*on\s*(?:Average\s*)?Net\s*Worth|RoE|Return\s*on\s*(?:average\s*)?equity/i],["nav",/NAV|Net\s*Asset\s*Value|Book\s*value/i],["pb",/P\s*\/\s*B|price\s*to\s*book/i],["mcap",/market\s*cap/i],["pat",/\bPAT\b|profit/i],["ev",/EV\s*\/\s*EBITDA/i]];
+  for(let p=s.start;p<=Math.min(s.end,s.start+18);p++){const R=grid[p-1]||[];
+    R.forEach((row,i)=>{const nc=numCells(row);if(nc.length<3)return;let name=rowLabel(row,nc);
+      if(!/[A-Za-z]{3}/.test(name)||/^(particulars|name|total|average|industry|peer)/i.test(name))return;
+      if(name.length<4&&i>0)name=R[i-1].cells.map(c=>c.s).join(" ");
+      if(own&&name.toLowerCase().startsWith(own))return;if(rows.some(r=>r.name===name))return;
+      const labs=headerLabels(R,i,nc);const map={};
+      labs.forEach((l,j)=>{let k=null;for(const [ck,re] of COLS){if(re.test(l)){k=ck;break}}if(k==="eps"&&/diluted/i.test(l))k="epsd";if(k&&map[k]==null)map[k]=cval(nc[j].s)});
+      if(map.pe==null&&map.ronw==null&&map.rev==null)return;
+      const unit=unitOf(labs.join(" "))||unitNear(R,i)||10;
+      let pe=map.pe,ronw=map.ronw,rev=map.rev;if(!(fin(pe)&&pe>0&&pe<1000))pe=null;if(!(fin(ronw)&&ronw>-300&&ronw<300))ronw=null;
+      rows.push({...bp(),name:name.replace(/\s+/g," ").trim().slice(0,80),rev:fin(rev)&&rev>0?+(rev/unit).toFixed(1):"",pe:fin(pe)?pe:"",roe:fin(ronw)?ronw:"",evE:fin(map.ev)&&map.ev>0?map.ev:"",src:"p. "+p});page=page||p});
+  }
+  return rows.length?{rows:rows.slice(0,6),page}:null;
 }
 
 /* ================= market pulse ================= */
@@ -2240,7 +2361,7 @@ function renderWbOut(){
   </div>`;
 }
 function updateStickers(){const el=document.querySelector("#tab-comp .stickers");if(!el)return;const CD=compData(analyse());el.innerHTML=awards(CD).map((a,i)=>sticker(a[0],a[1],a[2],[-4,3,-2,4,-3,2][i%6])).join("")||`<span class="note">Stickers appear once you add peer figures.</span>`}
-async function loadAnchor(file,fromHero){const st=$("aStatus"),st2=$("aStatus2");const say=t=>{if(st)st.textContent=t;if(st2)st2.textContent=t};say("Reading "+file.name+"…");try{const txt=await readAnchorFile(file);const rows=parseAnchorText(txt);if(rows.length){W.anchor={rows,file:file.name};renderAnchor();renderScore();renderReportTab();say(`Loaded ${rows.length} anchor investors from ${file.name}.`);if(fromHero&&D){openTab("report");$("analyser").scrollIntoView({behavior:"smooth"})}}else say("Couldn’t find investor rows in this file. Open the Anchor Book tab to paste the table.")}catch(e){console.error(e);say(e.message||"This file couldn’t be read.")}}
+async function loadAnchor(file,fromHero){const st=$("aStatus"),st2=$("aStatus2");const say=t=>{if(st)st.textContent=t;if(st2)st2.textContent=t};say("Reading "+file.name+"…");try{const RD=await readAnchorFile(file);if(RD.scanned){say("This PDF looks like a scanned image, so its text can’t be read. Open the Anchor Book tab and paste the table, or upload the Excel/CSV version.");return}let rows=parseAnchorGrid(RD.grid);if(rows.length<2)rows=parseAnchorText(RD.text);const pz=rows.map(r=>num(r.price)).filter(x=>fin(x)&&x>=10);if(!fin(num(W.offer.price))&&pz.length){W.offer.price=pz.sort((a,b)=>b-a)[0];deriveOffer()}if(rows.length){W.anchor={rows,file:file.name};renderAnchor();renderScore();renderReportTab();say(`Loaded ${rows.length} anchor investors from ${file.name}.`);if(fromHero&&D){openTab("report");$("analyser").scrollIntoView({behavior:"smooth"})}}else say("Couldn’t find investor rows in this file. Open the Anchor Book tab to paste the table.")}catch(e){console.error(e);say(e.message||"This file couldn’t be read.")}}
 document.addEventListener("dragover",e=>{if(e.target.closest&&(e.target.closest("#aDrop")||e.target.closest("#aDrop2"))){e.preventDefault()}});
 document.addEventListener("drop",e=>{const z2=e.target.closest&&e.target.closest("#aDrop2");if(z2){e.preventDefault();if(e.dataTransfer.files[0])loadAnchor(e.dataTransfer.files[0],true);return}const z=e.target.closest&&e.target.closest("#aDrop");if(z){e.preventDefault();if(e.dataTransfer.files[0])loadAnchor(e.dataTransfer.files[0])}});
 function renderAll(){renderHead();renderOverview();renderSections();renderRisks();renderFlags();renderWorkbench();renderComp();renderPulse();renderAnchor();renderScore();renderStudio();renderReportTab()}
