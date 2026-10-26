@@ -564,6 +564,12 @@ td input.auto{background:var(--good-soft);border-color:#9BD3B4}
 
 .qf{margin:0 0 14px}.qf summary{cursor:pointer;display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
 .qf .row-inputs{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+
+.qs{display:block;font-size:11px;margin-top:3px;font-weight:600}
+.qs.ok{color:var(--good)}.qs.man{color:var(--muted)}.qs.miss{color:var(--warn)}
+.qf-links{margin-top:10px;align-items:center}
+.qf-paste{margin-top:10px}.qf-paste textarea{min-height:70px}
+.small.good{color:var(--good)}.small.bad{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -1029,9 +1035,9 @@ async function loadFile(file){
   W.company=F.name.v||file.name.replace(/\.pdf$/i,"");
   if(fin(F.fresh.v))W.offer.fresh=+F.fresh.v.toFixed(2);
   if(fin(F.ofs.v))W.offer.ofs=+F.ofs.v.toFixed(2);else if(!F.hasOFS)W.offer.ofs=0;
-  if(fin(F.band.hi))W.offer.price=F.band.hi;
-  if(fin(F.lot.v))W.pulse.lot=F.lot.v;
-  W.about=safe(()=>aboutFromDoc(pages,sec),"");if(fin(F.band.lo))W.priceLow=F.band.lo;W.dates={open:F.open.v,close:F.close.v};
+  W.src={};if(fin(F.band.hi)){W.offer.price=F.band.hi;W.src.hi="rhp"}
+  if(fin(F.lot.v)){W.pulse.lot=F.lot.v;W.src.lot="rhp"}
+  W.about=safe(()=>aboutFromDoc(pages,sec),"");if(fin(F.band.lo)){W.priceLow=F.band.lo;W.src.lo="rhp"}W.dates={open:F.open.v,close:F.close.v};
   const FIN=mergeFin(safe(()=>extractFinancials(pages,sec),null),safe(()=>extractFinancialsGrid(grid,pages,sec),null));D.fin=FIN;
   if(FIN&&FIN.rows.length){W.years=FIN.rows;W.unit="cr"}
   const SH=safe(()=>extractShares(pages,sec,F,FIN),null);D.shares=SH;if(SH)W.offer.shares=+SH.post.toFixed(4);
@@ -1918,16 +1924,22 @@ function renderPulseOut(){
   </div>`;
 }
 function parsePaste(t){
-  const flat=t.replace(/\u00a0/g," ");const got=[];const n=x=>num(String(x).replace(/,/g,""));
-  let m=flat.match(/Price Band[^\d₹]{0,20}₹?\s*([\d,]+(?:\.\d+)?)\s*(?:to|-|–)\s*₹?\s*([\d,]+(?:\.\d+)?)/i);
-  if(m){W.offer.price=n(m[2]);got.push("price ₹"+m[2])}else{m=flat.match(/Issue Price[^\d₹]{0,20}₹?\s*([\d,]+(?:\.\d+)?)/i);if(m){W.offer.price=n(m[1]);got.push("price ₹"+m[1])}}
-  m=flat.match(/Lot Size[^\d]{0,20}([\d,]+)\s*Shares/i);if(m){W.pulse.lot=n(m[1]);got.push("lot "+m[1])}
-  m=flat.match(/\bGMP\b[^\d₹\-−]{0,25}₹?\s*([\-−]?[\d,]+(?:\.\d+)?)/i);if(m){W.pulse.gmp=n(m[1].replace("−","-"));got.push("GMP ₹"+m[1])}
-  const sub=(re,k,l)=>{const mm=flat.match(re);if(mm){W.pulse[k]=n(mm[1]);got.push(l+" "+mm[1]+"x")}};
-  sub(/(?:\bQIBs?\b|Qualified Institution\w*(?: Buyers?)?)[^\n\d]{0,40}(\d+\.\d{1,2})\s*(?:x|times)?/i,"qib","QIB");
-  sub(/(?:\bNIIs?\b|\bHNIs?\b|Non[- ]Institutional\w*(?: Investors?)?)[^\n\d]{0,40}(\d+\.\d{1,2})\s*(?:x|times)?/i,"nii","NII");
-  sub(/(?:\bRIIs?\b|Retail(?: Individual)?(?: Investors?)?)[^\n\d]{0,40}(\d+\.\d{1,2})\s*(?:x|times)?/i,"retail","Retail");
-  sub(/(?:\bTotal\b|\bOverall\b)[^\n\d]{0,30}(\d+\.\d{1,2})\s*(?:x|times)/i,"total","Total");
+  const flat=t.replace(/\u00a0/g," ").replace(/Rs\.?\s*/gi,"₹").replace(/INR\s*/gi,"₹");const got=[];const n=x=>num(String(x).replace(/[,₹\s]/g,""));
+  W.src=W.src||{};const mark=k=>{W.src[k]="paste"};
+  let m=flat.match(/Price\s*Band[^\d₹]{0,25}₹?\s*([\d,]+(?:\.\d+)?)\s*(?:to|-|–|—)\s*₹?\s*([\d,]+(?:\.\d+)?)/i);
+  if(m){W.priceLow=n(m[1]);W.offer.price=n(m[2]);mark("lo");mark("hi");got.push(`price band ₹${m[1]}–₹${m[2]}`)}
+  else{m=flat.match(/(?:Issue|Offer|Final)\s*Price[^\d₹]{0,25}₹?\s*([\d,]+(?:\.\d+)?)/i);if(m){W.offer.price=n(m[1]);mark("hi");got.push("price ₹"+m[1])}}
+  m=flat.match(/(?:Lot\s*Size|Market\s*Lot|Minimum\s*(?:Bid|Lot|Order)(?:\s*Quantity)?|Bid\s*Lot)[^\d]{0,25}([\d,]+)\s*(?:Equity\s*)?Shares?/i);
+  if(m){W.pulse.lot=n(m[1]);mark("lot");got.push("lot "+m[1]+" shares")}
+  m=flat.match(/\b(?:GMP|Grey\s*Market\s*Premium)\b[^\d₹\-−]{0,30}₹?\s*([\-−]?[\d,]+(?:\.\d+)?)/i);
+  if(m){W.pulse.gmp=n(m[1].replace("−","-"));mark("gmp");got.push("GMP ₹"+m[1])}
+  const sub=(re,k,l)=>{const mm=flat.match(re);if(mm){W.pulse[k]=n(mm[1]);mark(k);got.push(l+" "+mm[1]+"x")}};
+  sub(/(?:\bQIBs?\b|Qualified\s*Institution\w*(?:\s*Buyers?)?)[^\n\d]{0,40}(\d+(?:\.\d{1,2})?)\s*(?:x|times)\b/i,"qib","QIB");
+  if(!fin(num(W.pulse.qib)))sub(/(?:\bQIBs?\b|Qualified\s*Institution\w*(?:\s*Buyers?)?)[^\n\d]{0,40}(\d+\.\d{1,2})\b/i,"qib","QIB");
+  sub(/(?:\bNIIs?\b|\bHNIs?\b|Non[- ]?Institutional\w*(?:\s*Investors?)?)(?![^\n]{0,6}\(?[bs]NII)[^\n\d]{0,40}(\d+(?:\.\d{1,2})?)\s*(?:x|times)?\b/i,"nii","NII");
+  sub(/(?:\bRIIs?\b|Retail(?:\s*Individual)?(?:\s*Investors?)?)[^\n\d]{0,40}(\d+(?:\.\d{1,2})?)\s*(?:x|times)?\b/i,"retail","Retail");
+  sub(/(?:\bTotal\b|\bOverall\b)(?:\s*Subscription)?[^\n\d]{0,30}(\d+(?:\.\d{1,2})?)\s*(?:x|times)\b/i,"total","Total");
+  if(!fin(num(W.pulse.total))||!got.some(g=>g.startsWith("Total")))sub(/(?:^|\n)\s*(?:Total|Overall)(?:\s*Subscription)?\s+(\d+\.\d{1,2})\b/i,"total","Total");
   return got;
 }
 
@@ -2288,12 +2300,28 @@ function renderReportPreview(){
 }
 window.addEventListener("resize",()=>{const el=$("rptPrev");if(el&&el.firstChild&&el.firstChild.classList&&el.firstChild.classList.contains("rpv-in")){const sc=Math.min(1,el.clientWidth/794);el.firstChild.style.transform=`scale(${sc})`;el.firstChild.style.marginLeft=Math.max(0,(el.clientWidth-794*sc)/2)+"px";el.style.height=Math.ceil(el.firstChild.scrollHeight*sc)+"px"}});
 
+function srcTag(k,val){
+  const S=W.src||{};const has=v=>v!=null&&v!==""&&fin(num(v));
+  if(!has(val))return `<span class="qs miss">Not found online: type or paste</span>`;
+  const t={rhp:"From the RHP",anchor:"From the anchor book",paste:"From pasted page",manual:"Typed by you"}[S[k]]||"Typed by you";
+  return `<span class="qs ${S[k]==="manual"||!S[k]?"man":"ok"}">${t}</span>`;
+}
 function quickForm(){
   const F=D?D.F:null;const P=W.pulse;const needPrice=!fin(num(W.offer.price));
-  const f=(k,l,v2,ph)=>`<label class="fld">${l}<input inputmode="decimal" data-qf="${k}" value="${esc(v2??"")}" placeholder="${esc(ph||"")}"></label>`;
-  return `<details class="qf box" ${needPrice||!fin(num(P.lot))?"open":""}><summary><b>Complete Your Report</b> <span class="muted small">${needPrice?"The price band isn’t in this document yet. Add it from the price-band announcement to unlock valuation.":"Live numbers that sharpen the verdicts"}</span></summary>
+  const co=(W.company||"").replace(/\s*\(illustrative\)/i,"").replace(/\s+(Limited|Ltd\.?)$/i,"");
+  const q=encodeURIComponent((co?co+" ":"")+"IPO");
+  const f=(k,l,v2,ph)=>`<label class="fld">${l}<input inputmode="decimal" data-qf="${k}" value="${esc(v2??"")}" placeholder="${esc(ph||"")}">${srcTag(k,v2)}</label>`;
+  const links=co?`<div class="srcs qf-links"><span class="small muted">Find it for ${esc(co)}:</span>
+    <a class="btn sm" target="_blank" rel="noopener" href="https://www.google.com/search?q=${q}+price+band+lot+size">Price band &amp; lot ↗</a>
+    <a class="btn sm" target="_blank" rel="noopener" href="https://www.google.com/search?q=site%3Achittorgarh.com+${q}">Chittorgarh ↗</a>
+    <a class="btn sm" target="_blank" rel="noopener" href="https://www.google.com/search?q=${q}+subscription+status+NSE">Live subscription ↗</a>
+    <a class="btn sm" target="_blank" rel="noopener" href="https://www.ipopremium.in/">GMP: IPO Premium ↗</a>
+    <a class="btn sm" target="_blank" rel="noopener" href="https://www.google.com/search?q=${q}+GMP+today">GMP search ↗</a></div>`:"";
+  return `<details class="qf box" ${needPrice||!fin(num(P.lot))||W.qfOpen?"open":""}><summary><b>Complete Your Report</b> <span class="muted small">${needPrice?"The price band isn’t in this document. Find it online or type it in to unlock valuation.":"Live numbers that sharpen the verdicts"}</span></summary>
+    ${links}
+    <div class="qf-paste"><textarea id="qfPaste" placeholder="Fastest way: open the IPO page on Chittorgarh, your broker or NSE, press Ctrl+A then Ctrl+C, and paste here. IPOView fills every box it recognises."></textarea><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px"><button class="btn primary sm" id="qfGo">Fill From Pasted Page</button><span class="small" id="qfOut"></span></div></div>
     <div class="row-inputs" style="margin-top:10px">${f("lo","Price band low, ₹",W.priceLow,"e.g. 1065")}${f("hi","Price band high, ₹",W.offer.price,"e.g. 1119")}${f("lot","Lot size, shares",P.lot,"e.g. 12")}${f("gmp","GMP, ₹",P.gmp,"optional")}${f("qib","QIB subscription, x",P.qib,"optional")}${f("nii","NII subscription, x",P.nii,"optional")}${f("retail","Retail subscription, x",P.retail,"optional")}${f("total","Total subscription, x",P.total,"optional")}${f("repay","Debt repaid from proceeds, ₹ cr",W.debtRepay,"from Objects")}</div>
-    <p class="note">${F&&F.freshShares&&F.freshShares.v?`The issue size is worked out from ${nf(F.freshShares.v,0)} fresh shares${F.ofsShares&&F.ofsShares.v?` and ${nf(F.ofsShares.v,0)} OFS shares`:""} at the upper price. `:""}The report below updates as you type.</p></details>`;
+    <p class="note">${F&&F.freshShares&&F.freshShares.v?`The issue size is worked out from ${nf(F.freshShares.v,0)} fresh shares${F.ofsShares&&F.ofsShares.v?` and ${nf(F.ofsShares.v,0)} OFS shares`:""} at the upper price. `:""}A static website can’t read other websites for you, so live numbers come from the buttons above, a paste, or typing. The report updates as you go.</p></details>`;
 }
 let qfT=null;
 function quickUpdate(){clearTimeout(qfT);qfT=setTimeout(()=>{deriveOffer();const el=$("tab-report");if(!el)return;const y=window.scrollY;const keepFocus=document.activeElement&&document.activeElement.dataset?document.activeElement.dataset.qf:null;
@@ -2361,7 +2389,7 @@ function renderWbOut(){
   </div>`;
 }
 function updateStickers(){const el=document.querySelector("#tab-comp .stickers");if(!el)return;const CD=compData(analyse());el.innerHTML=awards(CD).map((a,i)=>sticker(a[0],a[1],a[2],[-4,3,-2,4,-3,2][i%6])).join("")||`<span class="note">Stickers appear once you add peer figures.</span>`}
-async function loadAnchor(file,fromHero){const st=$("aStatus"),st2=$("aStatus2");const say=t=>{if(st)st.textContent=t;if(st2)st2.textContent=t};say("Reading "+file.name+"…");try{const RD=await readAnchorFile(file);if(RD.scanned){say("This PDF looks like a scanned image, so its text can’t be read. Open the Anchor Book tab and paste the table, or upload the Excel/CSV version.");return}let rows=parseAnchorGrid(RD.grid);if(rows.length<2)rows=parseAnchorText(RD.text);const pz=rows.map(r=>num(r.price)).filter(x=>fin(x)&&x>=10);if(!fin(num(W.offer.price))&&pz.length){W.offer.price=pz.sort((a,b)=>b-a)[0];deriveOffer()}if(rows.length){W.anchor={rows,file:file.name};renderAnchor();renderScore();renderReportTab();say(`Loaded ${rows.length} anchor investors from ${file.name}.`);if(fromHero&&D){openTab("report");$("analyser").scrollIntoView({behavior:"smooth"})}}else say("Couldn’t find investor rows in this file. Open the Anchor Book tab to paste the table.")}catch(e){console.error(e);say(e.message||"This file couldn’t be read.")}}
+async function loadAnchor(file,fromHero){const st=$("aStatus"),st2=$("aStatus2");const say=t=>{if(st)st.textContent=t;if(st2)st2.textContent=t};say("Reading "+file.name+"…");try{const RD=await readAnchorFile(file);if(RD.scanned){say("This PDF looks like a scanned image, so its text can’t be read. Open the Anchor Book tab and paste the table, or upload the Excel/CSV version.");return}let rows=parseAnchorGrid(RD.grid);if(rows.length<2)rows=parseAnchorText(RD.text);const pz=rows.map(r=>num(r.price)).filter(x=>fin(x)&&x>=10);if(!fin(num(W.offer.price))&&pz.length){W.offer.price=pz.sort((a,b)=>b-a)[0];W.src=W.src||{};W.src.hi="anchor";deriveOffer()}if(rows.length){W.anchor={rows,file:file.name};renderAnchor();renderScore();renderReportTab();say(`Loaded ${rows.length} anchor investors from ${file.name}.`);if(fromHero&&D){openTab("report");$("analyser").scrollIntoView({behavior:"smooth"})}}else say("Couldn’t find investor rows in this file. Open the Anchor Book tab to paste the table.")}catch(e){console.error(e);say(e.message||"This file couldn’t be read.")}}
 document.addEventListener("dragover",e=>{if(e.target.closest&&(e.target.closest("#aDrop")||e.target.closest("#aDrop2"))){e.preventDefault()}});
 document.addEventListener("drop",e=>{const z2=e.target.closest&&e.target.closest("#aDrop2");if(z2){e.preventDefault();if(e.dataTransfer.files[0])loadAnchor(e.dataTransfer.files[0],true);return}const z=e.target.closest&&e.target.closest("#aDrop");if(z){e.preventDefault();if(e.dataTransfer.files[0])loadAnchor(e.dataTransfer.files[0])}});
 function renderAll(){renderHead();renderOverview();renderSections();renderRisks();renderFlags();renderWorkbench();renderComp();renderPulse();renderAnchor();renderScore();renderStudio();renderReportTab()}
@@ -2418,6 +2446,7 @@ document.addEventListener("click",e=>{
   if(t.dataset.rmkpi){W.kpis.splice(+t.dataset.rmkpi,1);renderComp();return}
   if(t.dataset.call){const k="call"+t.dataset.call;W.view[k]=W.view[k]===t.dataset.v?"":t.dataset.v;renderScore();return}
   if(t.dataset.act==="docx"||t.id==="btnDocx"){downloadDocx(t);return}
+  if(t.id==="qfGo"){W.qfOpen=true;const got=parsePaste(($("qfPaste")||{}).value||"");deriveOffer();const out=got.length?"✓ Filled: "+got.join(", ")+". Anything still blank wasn’t on that page: type it in.":"Nothing recognised on that page. Type the numbers in the boxes instead.";renderReportTab();const o=$("qfOut");if(o){o.textContent=out;o.className="small "+(got.length?"good":"bad")}return}
   if(t.dataset.goto){openTab(t.dataset.goto);$("analyser").scrollIntoView({behavior:"smooth"});return}
   if(t.id==="rtXlsx"){saveXlsx();return}
   if(t.id==="aParse"){const rows=parseAnchorText($("aPaste").value);if(rows.length){W.anchor={rows,file:"Pasted table"};renderAnchor()}else $("aStatus").textContent="Couldn’t find investor rows. Each row needs a name and the amount or shares.";return}
@@ -2439,7 +2468,7 @@ document.addEventListener("click",e=>{
 document.addEventListener("input",e=>{
   const t=e.target,d=t.dataset;
   if(d.y!=null){W.years[+d.y][d.k]=t.value;if(d.k==="label"){}renderWbOut();return}
-  if(d.qf){const v2=t.value;const k=d.qf;if(k==="lo")W.priceLow=v2;else if(k==="hi"){W.offer.price=v2}else if(k==="repay")W.debtRepay=v2;else W.pulse[k]=v2;quickUpdate();return}
+  if(d.qf){W.qfOpen=true;const v2=t.value;const k=d.qf;W.src=W.src||{};W.src[k]="manual";const tg=t.parentElement&&t.parentElement.querySelector(".qs");if(tg){tg.className="qs "+(v2?"man":"miss");tg.textContent=v2?"Typed by you":"Not found online: type or paste"}if(k==="lo")W.priceLow=v2;else if(k==="hi"){W.offer.price=v2}else if(k==="repay")W.debtRepay=v2;else W.pulse[k]=v2;quickUpdate();return}
   if(d.o){W.offer[d.o]=t.value;if(d.o==="price")deriveOffer();if(d.o==="fresh")W.offer.freshDerived=false;if(d.o==="ofs")W.offer.ofsDerived=false;renderWbOut();renderPulseOut();return}
   if(d.pu){W.pulse[d.pu]=t.value;renderPulseOut();return}
   if(d.adj){const k="adj"+d.adj;W[k]=num(t.value)||0;const a=$(k==="adjST"?"adjSTv":"adjLTv");if(a)a.textContent=(W[k]>0?"+":"")+nf(W[k],1);return}
